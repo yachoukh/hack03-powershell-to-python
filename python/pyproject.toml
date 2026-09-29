@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stale-cleanup"
+version = "0.1.0"
+description = "Azure resource group stale cleanup report CLI for Copilot hackathon learners."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "azure-identity>=1.17.0",
+    "azure-mgmt-resource>=26.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+stale-cleanup = "stale_cleanup.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = ["challenge: skipped starter challenge tests"]

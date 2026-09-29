@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+test-results/
+*.egg-info/
+build/
+dist/
+*.pyc
+stale-resource-groups.csv
+*-report.csv
+testResults.xml
+!python/tests/fixtures/*.csv

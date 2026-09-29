@@ -1,0 +1,133 @@
+trigger:
+  branches:
+    include:
+      - '*'
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Lint_Test
+    displayName: Lint and test
+    jobs:
+      - job: PowerShell
+        displayName: PowerShell validation
+        steps:
+          - task: PowerShell@2
+            displayName: Install PowerShell test tools
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+                Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+                Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
+          - task: PowerShell@2
+            displayName: Analyze legacy script
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $results = Invoke-ScriptAnalyzer -Path legacy -Recurse -Severity Error,Warning
+                $results | Format-Table -AutoSize
+                if ($results) { throw 'PSScriptAnalyzer found issues.' }
+          - task: PowerShell@2
+            displayName: Run Pester tests
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+                $configuration = New-PesterConfiguration
+                $configuration.Run.Path = 'legacy/tests'
+                $configuration.TestResult.Enabled = $true
+                $configuration.TestResult.OutputFormat = 'NUnitXml'
+                $configuration.TestResult.OutputPath = '$(Common.TestResultsDirectory)/pester-results.xml'
+                Invoke-Pester -Configuration $configuration
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: NUnit
+              testResultsFiles: '$(Common.TestResultsDirectory)/pester-results.xml'
+              failTaskOnFailedTests: true
+
+      - job: Python
+        displayName: Python validation
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+          - bash: |
+              set -euo pipefail
+              cd python
+              python -m pip install --upgrade pip
+              python -m pip install -e '.[dev]'
+              ruff check .
+              ruff format --check .
+              pytest --junitxml=../test-results/pytest.xml --cov=stale_cleanup --cov-report=xml:../coverage.xml
+            displayName: Run Python lint and tests
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: test-results/pytest.xml
+              failTaskOnFailedTests: true
+          - task: PublishCodeCoverageResults@2
+            condition: always()
+            inputs:
+              summaryFileLocation: coverage.xml
+
+  - stage: ParityDryRun
+    displayName: Parity dry run
+    dependsOn: Lint_Test
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/solution'), startsWith(variables['Build.SourceBranch'], 'refs/heads/ready/')))
+    jobs:
+      - job: CompareReports
+        displayName: Compare PowerShell and Python reports
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+          - bash: |
+              echo "##vso[task.setvariable variable=asOfDate]$(date -u +%F)"
+            displayName: Set shared as-of date
+          - task: AzurePowerShell@5
+            displayName: Run legacy dry run
+            inputs:
+              azureSubscription: sc-copilot-hack-sandbox
+              ScriptType: InlineScript
+              azurePowerShellVersion: LatestVersion
+              pwsh: true
+              Inline: |
+                $subscriptionId = (Get-AzContext).Subscription.Id
+                ./legacy/Invoke-StaleResourceCleanup.ps1 `
+                  -SubscriptionId $subscriptionId `
+                  -NamePrefix 'rg-copilot-hack-stale-' `
+                  -TagFilter @{ purpose = 'copilot-hackathon' } `
+                  -AsOfDate ([datetime]'$(asOfDate)') `
+                  -ReportPath '$(Build.ArtifactStagingDirectory)/ps-report.csv' `
+                  -WhatIf
+          - task: AzureCLI@2
+            displayName: Run Python dry run
+            inputs:
+              azureSubscription: sc-copilot-hack-sandbox
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                cd python
+                python -m pip install --upgrade pip
+                python -m pip install -e '.[dev]'
+                export AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                stale-cleanup \
+                  --name-prefix 'rg-copilot-hack-stale-' \
+                  --tag-filter purpose=copilot-hackathon \
+                  --as-of-date '$(asOfDate)' \
+                  --report-path '$(Build.ArtifactStagingDirectory)/py-report.csv'
+          - bash: |
+              set -euo pipefail
+              python tools/compare_reports.py \
+                '$(Build.ArtifactStagingDirectory)/ps-report.csv' \
+                '$(Build.ArtifactStagingDirectory)/py-report.csv'
+            displayName: Compare reports
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: parity-reports
